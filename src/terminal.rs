@@ -142,6 +142,12 @@ where
     pub fn set_cursor(&mut self, x: u16, y: u16) {
         self.cursor_position = Some((x, y));
     }
+
+    /// Returns the current cursor position, or `None` if [`Self::set_cursor`]
+    /// has not been called.
+    pub fn get_cursor(&self) -> Option<(u16, u16)> {
+        self.cursor_position
+    }
 }
 
 /// CompletedFrame represents the state of the terminal after all changes performed in the last
@@ -211,6 +217,13 @@ where
         &mut self.buffers[self.current]
     }
 
+    /// Swaps the internal buffers to prepare for the next frame. See
+    /// [`Self::flush`] for more info.
+    pub fn swap_buffers(&mut self) {
+        self.current = 1 - self.current;
+        self.buffers[self.current].reset();
+    }
+
     pub fn backend(&self) -> &B {
         &self.backend
     }
@@ -219,8 +232,22 @@ where
         &mut self.backend
     }
 
-    /// Obtains a difference between the previous and the current buffer and passes it to the
-    /// current backend for drawing.
+    /// Flushes the backend, ensuring all changes are displayed.
+    ///
+    /// Before calling this function, first call [`Self::flush`] and then set
+    /// the cursor position, for example via [`Self::set_cursor_opt`].
+    pub fn flush_backend(&mut self) -> io::Result<()> {
+        self.backend.flush()
+    }
+
+    /// Obtains a difference between the previous and the current buffer and
+    /// passes it to the current backend for drawing.
+    ///
+    /// To make sure the changes are displayed properly after calling this
+    /// function, [`Self::flush_backend`] must be called.
+    ///
+    /// To prepare for the next frame after calling this function,
+    /// [`Self::swap_buffers`] must be called before any further rendering.
     pub fn flush(&mut self) -> io::Result<()> {
         let previous_buffer = &self.buffers[1 - self.current];
         let current_buffer = &self.buffers[self.current];
@@ -261,28 +288,19 @@ where
 
         let mut frame = self.get_frame();
         f(&mut frame);
-        // We can't change the cursor position right away because we have to flush the frame to
-        // stdout first. But we also can't keep the frame around, since it holds a &mut to
-        // Terminal. Thus, we're taking the important data out of the Frame and dropping it.
-        let cursor_position = frame.cursor_position;
+        // We can't set the cursor position right away because in some backends,
+        // it will get overwritten when we flush the buffer contents. But we
+        // also can't keep the frame around, since it holds a &mut to Terminal.
+        // Thus, we're saving the position for later and dropping the Frame.
+        let cursor_position = frame.get_cursor();
 
         // Draw to stdout
         self.flush()?;
+        self.set_cursor_opt(cursor_position)?;
+        self.flush_backend()?;
 
-        match cursor_position {
-            None => self.hide_cursor()?,
-            Some((x, y)) => {
-                self.show_cursor()?;
-                self.set_cursor(x, y)?;
-            }
-        }
+        self.swap_buffers();
 
-        // Swap buffers
-        self.buffers[1 - self.current].reset();
-        self.current = 1 - self.current;
-
-        // Flush
-        self.backend.flush()?;
         Ok(CompletedFrame {
             buffer: &self.buffers[1 - self.current],
             area: self.viewport.area,
@@ -307,6 +325,19 @@ where
 
     pub fn set_cursor(&mut self, x: u16, y: u16) -> io::Result<()> {
         self.backend.set_cursor(x, y)
+    }
+
+    /// Like [`Self::set_cursor`], but also calls [`Self::show_cursor`] or
+    /// [`Self::hide_cursor`] as appropriate.
+    pub fn set_cursor_opt(&mut self, position: Option<(u16, u16)>) -> io::Result<()> {
+        match position {
+            None => self.hide_cursor()?,
+            Some((x, y)) => {
+                self.show_cursor()?;
+                self.set_cursor(x, y)?;
+            }
+        }
+        Ok(())
     }
 
     /// Clear the terminal and force a full redraw on the next draw call.
