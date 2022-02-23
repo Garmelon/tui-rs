@@ -345,4 +345,10 @@ where
     pub fn size(&self) -> io::Result<Rect> {
         self.backend.size()
     }
+
+    /// Size that this `Terminal` is currently set to. Use [`Self::autoresize`]
+    /// to update this to the backend's real size.
+    pub fn current_size(&self)->Rect{
+        self.viewport.area
+    }
 }
